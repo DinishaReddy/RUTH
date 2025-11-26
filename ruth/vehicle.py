@@ -135,6 +135,7 @@ class Vehicle:
     """A period in which the raw FCD data are sampled"""
     fcd_sampling_period: timedelta = set_numpy_type("object")
     status: str = set_numpy_type("string")
+    vehicle_type: str = set_numpy_type("string")  # Added vehicle type field
     alternatives: VehicleAlternatives = VehicleAlternatives.DEFAULT
     route_selection: VehicleRouteSelection = VehicleRouteSelection.NO_ALTERNATIVE
     current_travel_time: Optional[CurrentTravelTime] = None

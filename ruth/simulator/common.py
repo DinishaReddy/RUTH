@@ -25,6 +25,7 @@ def load_vehicles(input_path: str):
         active=row["active"],
         fcd_sampling_period=row["fcd_sampling_period"],
         status=row["status"],
+        vehicle_type = row["vehicle_type"] # Added to include vehicle type row.get("vehicle_type", "car")
 
     ) for (_, row) in df.iterrows()]
 
