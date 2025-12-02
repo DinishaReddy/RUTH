@@ -93,7 +93,11 @@ def set_vehicle_behavior(vehicles: List['Vehicle'],
     for n, alternative in zip(n_vehicles_to_change_alt, VehicleAlternatives):
         index_to = index_from + n
         for v in vehicles_shuffled[index_from:index_to]:
-            v.alternatives = alternative
+            if v.vehicle_type == "truck":
+                # Truck simplified routing: stick to default route
+                v.alternatives = VehicleAlternatives.DEFAULT
+            else:
+                v.alternatives = alternative
         index_from = index_from + n
 
     index_from = n_vehicles_to_change_alt[0]
@@ -106,7 +110,12 @@ def set_vehicle_behavior(vehicles: List['Vehicle'],
     for n, route_selection in zip(n_vehicles_to_change_selection, VehicleRouteSelection):
         index_to = index_from + n
         for v in vehicles_shuffled[index_from:index_to]:
-            v.route_selection = route_selection
+            if v.vehicle_type == "truck":
+                # Trucks will not have alternatives to choose from so it cant select from first route, no random or PTDR
+                v.route_selection = VehicleRouteSelection.NO_ALTERNATIVE
+            else:
+                v.route_selection = route_selection
+
         index_from = index_from + n
 
     return
