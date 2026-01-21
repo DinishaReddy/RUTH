@@ -33,6 +33,7 @@
   "animation" : {
     "length": 10,
     "title": "",
-    "gif": false
+    "gif": false,
+    "plot-cars": true
   }
 }
