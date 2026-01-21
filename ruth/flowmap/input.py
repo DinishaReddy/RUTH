@@ -60,14 +60,16 @@ class SegmentInTime(metaclass=Singleton):
         self.length = length
         self.inner_counts = [0] * (divide - 2)  # -2 for two nodes
         self.offsets = []
+        self.vehicle_types = []  # New list to store vehicle types
         self.divide = divide
         self.speeds_list = [[] for _ in range(divide)]
 
     def __hash__(self):
         return hash((self.node_from.id, self.node_to.id, self.timestamp))
 
-    def add_vehicle(self, start_offset_m: float, speed_mps: float):
+    def add_vehicle(self, start_offset_m: float, speed_mps: float, vehicle_type: str = None):
         self.offsets.append(start_offset_m)
+        self.vehicle_types.append(vehicle_type)  # Store vehicle type
         step = self.length / self.divide
         division = int(start_offset_m // step)
         if division >= self.divide:
@@ -100,9 +102,15 @@ class SegmentInTime(metaclass=Singleton):
 
     @property
     def cars_offsets(self):
-        if sum(self.counts) > 5:
-            return sum(self.offsets) / len(self.offsets)
-        return None
+        if len(self.offsets) > 20:  # If too many vehicles, don't plot individuals
+            return None
+        return self.offsets
+
+    @property
+    def cars_types(self):
+        if len(self.vehicle_types) > 20:
+            return None
+        return self.vehicle_types
 
 
 @dataclass
@@ -117,6 +125,7 @@ class Record:
     node_from: NodeId
     node_to: NodeId
     meters_driven: float
+    vehicle_type: str
 
 def add_vehicle(record: Record, divide: int, timestamp: int = None, start_offset_m: float = None, speed_mps: float = None):
     """Add vehicle to **singleton** segment in time element."""
@@ -130,7 +139,7 @@ def add_vehicle(record: Record, divide: int, timestamp: int = None, start_offset
     timed_seg = SegmentInTime(
         record.node_from, record.node_to, record.segment_length, timestamp, divide
     )
-    timed_seg.add_vehicle(start_offset_m, speed_mps)
+    timed_seg.add_vehicle(start_offset_m, speed_mps, record.vehicle_type)
 
     return timed_seg
 

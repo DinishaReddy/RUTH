@@ -354,15 +354,28 @@ class SimulationAnimator(ABC):
                     car_coordinates.pop(0)
                 xp = []
                 yp = []
+                colors = []
                 for segment in segments:
-                    if segment.cars_offsets is not None:
+                    if segment.cars_offsets is not None and segment.cars_types is not None:
                         x, y = self.get_cars_xy(segment.node_from.id, segment.node_to.id, segment.cars_offsets)
-                        xp.append(x)
-                        yp.append(y)
+                        xp.extend(x)
+                        yp.extend(y)
+                        # Assign colors based on vehicle type: car=blue, truck=red
+                        for vtype in segment.cars_types:
+                            if vtype == 'car':
+                                colors.append('blue')
+                            elif vtype == 'truck':
+                                colors.append('red')
+                            else:
+                                colors.append('black')  # default
                 alphas = [1, 0.75, 0.5]
-                car_coordinates.append((xp, yp))
+                car_coordinates.append((xp, yp, colors))
                 for coords, alpha in zip(reversed(car_coordinates), alphas):
-                    self.ax_traffic.scatter(coords[0], coords[1], facecolors='none', edgecolors='black', alpha=alpha)
+                    if len(coords) == 3:  # has colors
+                        self.ax_traffic.scatter(coords[0], coords[1], c=coords[2], alpha=alpha, s=20)
+                    else:
+                        # fallback for old format
+                        self.ax_traffic.scatter(coords[0], coords[1], facecolors='none', edgecolors='black', alpha=alpha)
 
             progress_bar.update(1)
             if i == self.num_of_frames - 1:
