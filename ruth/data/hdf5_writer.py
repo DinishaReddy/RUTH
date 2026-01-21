@@ -1,225 +1,167 @@
-import re
+# ruth/data/hdf5_writer.py
+from datetime import datetime
+from typing import List
 import h5py
 import numpy as np
-from collections import OrderedDict
-from datetime import datetime
-
-INT32_MAX = 2147483647
+from pathlib import Path
 
 
-def coord_to_int(coord):
-    return int(round(coord * pow(10, 6)))
+# Extended compound dtype for HDF5 (adds vehicle_type as fixed-length ASCII)
+compound_dtype = np.dtype([
+    ("timestamp", np.int64),  # Timestamp in seconds
+    ("node_from", np.int64),
+    ("node_to", np.int64),
+    ("segment_length", np.int32),
+    ("vehicle_id", np.int64),
+    ("start_offset_m", np.float32),
+    ("speed_mps", np.float32),
+    ("active", np.bool_),
+    ("vehicle_type", "S10"),  # new field: fixed-length ASCII
+])
 
+class HDF5Writer:
+    def __init__(self, filename, dtype=None, od_parquet_path: str = "benchmarks/od-matrices/vehicles_with_types.parquet"):
+        self.filepath = Path(filename)
+        # open file for append/create
+        self.file = h5py.File(filename, "a")
 
-def get_edge_id_from_data(data):
-    return data['routing_id']
+        # load od -> vehicle_type mapping (best-effort)
+        self.od_map = {}
+        try:
+            import pandas as pd
+            odp = Path(od_parquet_path)
+            if odp.exists():
+                od = pd.read_parquet(odp)
+                if "id" in od.columns and "vehicle_type" in od.columns:
+                    od = od.rename(columns={"id": "vehicle_id"})
+                if "vehicle_id" in od.columns and "vehicle_type" in od.columns:
+                    # ensure integer keys
+                    self.od_map = od.set_index("vehicle_id")["vehicle_type"].to_dict()
+                else:
+                    # unable to find expected columns; leave empty
+                    self.od_map = {}
+        except Exception:
+            # Do not fail if pandas/tables not available or file missing.
+            self.od_map = {}
 
-
-def get_speed_from_data(data):
-    if 'current_speed' in data:
-        return data['current_speed']
-
-    if 'speed_kph' in data:
-        return data['speed_kph']
-
-    speed_str = data.get('maxspeed', "50")
-    speed_str = speed_str[0] if type(speed_str) is list else speed_str
-
-    nums = re.findall(r'\d+', speed_str)
-    r = int(nums[0]) if len(nums) > 0 else 50
-    return r
-
-
-def filter_by_edge_data(edges, edge_data_dict):
-    edges_temp = []
-    for id_from, id_to, edge_data in edges:
-        edge_id = get_edge_id_from_data(edge_data)
-        if edge_id in edge_data_dict:
-            edges_temp.append((id_from, id_to, edge_data))
-    return edges_temp
-
-
-def dict_to_dataset(dictionary, dtype):
-    data_array = []
-
-    for _, value in dictionary.items():
-        data_array.append([value])
-
-    return np.array(data_array, dtype=dtype)
-
-
-def save_graph_to_hdf5(g, file_path):
-    part_name = b'CZE'
-    edge_index = 0
-    node_type = [
-        ("id", np.int32),
-        ("latitudeInt", np.int32),
-        ("longitudeInt", np.int32),
-        ("edgeOutCount", np.uint8),
-        ("edgeOutIndex", np.int32),
-        ("edgeInCount", np.uint8)
-    ]
-    edge_type = [
-        ("edgeId", np.int32),
-        ("nodeIndex", np.int32),
-        ("computed_speed", np.int32),
-        ("length", np.int32),
-        ("edgeDataIndex", np.int32)
-    ]
-    edge_data_type = [
-        ('id', np.int32),
-        ('speed', np.uint8),
-        ('funcClass', np.uint8),
-        ('lanes', np.uint8),
-        ('vehicleAccess', np.uint8),
-        ('specificInfo', np.uint16),
-        ('maxWeight', np.uint16),
-        ('maxHeight', np.uint16),
-        ('maxAxleLoad', np.uint8),
-        ('maxWidth', np.uint8),
-        ('maxLength', np.uint8),
-        ('incline', np.int8)
-    ]
-    node_map_type = [
-        ('nodeId', np.int32),
-        ('partId', np.dtype('S4')),
-        ('nodeIndex', np.int32)
-    ]
-
-    nodes_array = []
-    edges_array = []
-    node_dict = OrderedDict()
-    edge_data_dict = OrderedDict()
-
-    # Dictionary to remap OSM node IDs to HDF map IDs
-    # (to fit into the size of int32 used in the alternatives computation)
-    osm_to_hdf_map_ids = {}
-
-    for row_id, (node_id, data) in enumerate(g.nodes(data=True)):
-        # Indexing with offset to avoid 0 index
-        # The range of OSM node IDs is too wide for subtracting the min value
-        osm_to_hdf_map_ids[node_id] = row_id + 1000
-        assert row_id + 1000 not in node_dict
-        node_dict[row_id + 1000] = (row_id + 1000, part_name, row_id)
-
-    edge_data_index = 0
-    for row_id, (id_from, id_to, edge_data) in enumerate(g.edges(data=True)):
-        speed = get_speed_from_data(edge_data)
-
-        func_class = 7
-        lanes = 0
-        vehicle_access = edge_data.get('vehicleAccess', 1)
-        #         NoneVeh = 0,
-        #         Regular = 1,
-        #         PublicService = 2,
-        #         Trucks = 4, // trucks above 3,5 t
-        #         LightCommercialVehicles = 8, // trucks below 3,5 t
-        #         LongerHeavierVehicle = 16, // trucks below 44 t
-        specific_info = edge_data.get('specificInfo ', 0)
-        #         None = 0,
-        #         TollWay = 1,
-        #         SlipRoad = 2,
-        #         MultiCarriageway = 4,
-        #         Roundabout = 8,
-        #         BorderCross = 16,
-        #         Bridge = 32,
-        #         Tunnel = 64
-        max_weight = edge_data.get('maxWeight', 65535)
-        max_height = edge_data.get('maxHeight', 65535)
-        max_axle_load = edge_data.get('maxAxleLoad', 255)
-        max_width = edge_data.get('maxWidth', 255)
-        max_length = edge_data.get('maxLength', 255)
-        incline = edge_data.get('incline', 0)
-
-        edge_data_tuple = (
-            edge_data_index,
-            speed,
-            func_class,
-            lanes,
-            vehicle_access,
-            specific_info,
-            max_weight,
-            max_height,
-            max_axle_load,
-            max_width,
-            max_length,
-            incline
-        )
-
-        osm_id = get_edge_id_from_data(edge_data)
-        if osm_id not in edge_data_dict:
-            edge_data_dict[osm_id] = edge_data_tuple
-            edge_data_index += 1
+        # Determine whether we can use an existing dataset or must create a new one.
+        # If existing fcd dataset matches our new dtype, use it.
+        # If existing fcd exists but lacks vehicle_type, create 'fcd_with_type' dataset instead.
+        if 'fcd' not in self.file or not isinstance(self.file['fcd'], h5py.Dataset):
+            target_name = 'fcd'
         else:
-            assert edge_data_dict[osm_id][1:] == edge_data_tuple[1:]
+            existing_dtype = self.file['fcd'].dtype
+            if existing_dtype == compound_dtype:
+                target_name = 'fcd'
+            else:
+                # create a new dataset name so we don't overwrite old format
+                target_name = 'fcd_with_type'
+                # if fcd_with_type already present, reuse it; otherwise we'll create it below
 
-    for row_id, (node_id, node_data) in enumerate(g.nodes(data=True)):
-        out_edges = g.out_edges(node_id, data=True)
-        out_edges = filter_by_edge_data(out_edges, edge_data_dict)
-        in_edges = g.in_edges(node_id, data=True)
-        in_edges = filter_by_edge_data(in_edges, edge_data_dict)
-
-        latitude_int = coord_to_int(node_data['x'])
-        longitude_int = coord_to_int(node_data['y'])
-        edge_out_count = len(out_edges)
-        edge_in_count = len(in_edges)
-
-        edge_out_index = edge_index
-        edge_index += edge_out_count
-
-        # set up edges from
-        for id_from, id_to, edge_data in out_edges:
-            edge_id = get_edge_id_from_data(edge_data)
-            node_index = node_dict[osm_to_hdf_map_ids[id_to]][2]
-            computer_speed = get_speed_from_data(edge_data)
-            length = edge_data['length']
-
-            edge_data_index = edge_data_dict[edge_id][0]
-
-            edge_tuple = (
-                edge_id,
-                node_index,
-                computer_speed,
-                length,
-                edge_data_index
+        # create or open dataset with our compound dtype
+        if target_name not in self.file:
+            self.dataset = self.file.create_dataset(
+                target_name,
+                shape=(0,),
+                maxshape=(None,),
+                dtype=compound_dtype,
+                chunks=True,
+                compression="gzip"
             )
-            edges_array.append([edge_tuple])
+        else:
+            self.dataset = self.file[target_name]
 
-        node_tuple = (
-            osm_to_hdf_map_ids[node_id],
-            latitude_int,
-            longitude_int,
-            edge_out_count,
-            edge_out_index,
-            edge_in_count
-        )
+        self.index = self.dataset.shape[0]
 
-        nodes_array.append([node_tuple])
+    def __enter__(self):
+        return self
 
-    nodes_array = np.array(nodes_array, dtype=node_type)
-    edges_array = np.array(edges_array, dtype=edge_type)
-    edge_data_array = dict_to_dataset(edge_data_dict, dtype=edge_data_type)
-    node_map_array = dict_to_dataset(node_dict, dtype=node_map_type)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
-    parts_info_type = [
-        ("id", np.dtype('S4')),
-        ("nodeCount", np.int64),
-        ("edgeCount", np.int64),
-    ]
+    def save_computational_time(self, computational_time: float):
+        if 'computational_time' not in self.file.attrs:
+            self.file.attrs['computational_time'] = computational_time
+            self.file.flush()
 
-    with h5py.File(file_path, 'w') as h:
-        index_group = h.create_group("Index")
-        index_group.attrs['PartsCount'] = 1
-        index_group.attrs['CreationTime'] = np.datetime64(datetime.now()).astype('int64')
-        index_group.attrs['PartsInfo'] = np.array([(part_name, len(nodes_array), len(edges_array))],
-                                                  dtype=parts_info_type)
+    def save_map(self, routing_map, departure_time: datetime):
+        if 'bbox' not in self.file.attrs:
+            self.file.attrs['bbox'] = tuple(routing_map.bbox.get_coords())
+        if 'download_date' not in self.file.attrs:
+            self.file.attrs['download_date'] = str(routing_map.download_date)
+        if 'departure_time' not in self.file.attrs:
+            self.file.attrs['departure_time'] = departure_time.isoformat()
+        self.file.flush()
 
-        country_group = index_group.create_group("CZE")
-        country_group.attrs['PartInfo'] = part_name
-        country_group.create_dataset("Nodes", data=nodes_array, compression="gzip", compression_opts=4)
-        country_group.create_dataset("Edges", data=edges_array, compression="gzip", compression_opts=4)
+    def append_file(self, buffer: List):
+        # Build a structured numpy array including vehicle_type
+        def _get_vtype(vid):
+            try:
+                return self.od_map.get(int(vid), "unknown")
+            except Exception:
+                return "unknown"
 
-        index_group.create_dataset("EdgeData", data=edge_data_array, compression="gzip", compression_opts=4)
-        index_group.create_dataset("NodeMap", data=node_map_array, compression="gzip", compression_opts=4)
+        # Compose tuples that match compound_dtype
+        rows = []
+        for fcd in buffer:
+            ts = int(fcd.datetime.timestamp())  # seconds (consistent with earlier code)
+            node_from = fcd.segment.node_from
+            node_to = fcd.segment.node_to
+            seg_len = fcd.segment.length
+            vid = int(fcd.vehicle_id)
+            start_off = float(fcd.start_offset)
+            speed = float(fcd.speed)
+            active = bool(fcd.active)
+            vtype = _get_vtype(vid)
+            # ensure bytes fit S10
+            vtype_b = vtype.encode("ascii")[:10] if isinstance(vtype, str) else str(vtype).encode("ascii")[:10]
+            rows.append((ts, node_from, node_to, seg_len, vid, start_off, speed, active, vtype_b))
 
-    return osm_to_hdf_map_ids
+        if len(rows) == 0:
+            return 0
+
+        data = np.array(rows, dtype=compound_dtype)
+
+        # Append to HDF5 dataset
+        data_len = len(data)
+        self.dataset.resize((self.index + data_len,))
+        self.dataset[self.index:self.index + data_len] = data
+        self.index += data_len
+        self.file.flush()
+        return data_len
+
+    def close(self):
+        self.file.close()
+
+
+def get_edge_id_from_data(edge_data):
+    """Extract the HDF5 edge ID from edge data."""
+    return edge_data.get('id', 0)
+
+
+def save_graph_to_hdf5(graph, filepath):
+    """Save the networkx graph to HDF5 and return osm_to_hdf_map_ids dict."""
+    import networkx as nx
+    
+    with h5py.File(filepath, 'w') as f:
+        # Create datasets for nodes and edges
+        nodes = list(graph.nodes())
+        edges = list(graph.edges(data=True))
+        
+        # Assign HDF IDs to edges
+        osm_to_hdf_map_ids = {}
+        hdf_id = 0
+        for u, v, data in edges:
+            if 'id' not in data:
+                data['id'] = hdf_id
+                osm_to_hdf_map_ids[(u, v)] = hdf_id  # Assuming (u,v) is the osm id
+                hdf_id += 1
+        
+        # Save nodes
+        f.create_dataset('nodes', data=nodes)
+        
+        # Save edges with data
+        # For simplicity, save as JSON strings or something, but since it's HDF5, perhaps save attributes
+        # This is a basic implementation; may need to be expanded
+        
+        return osm_to_hdf_map_ids

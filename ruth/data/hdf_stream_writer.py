@@ -15,6 +15,7 @@ compound_dtype = np.dtype([
     ("start_offset_m", np.float32),
     ("speed_mps", np.float32),
     ("active", np.bool_),
+    ("vehicle_type", "S8")
 ])
 
 class HDF5Writer:
@@ -56,10 +57,20 @@ class HDF5Writer:
     def append_file(self, buffer: List):
         # Create a structured numpy array from the FCD records in the buffer
         data = np.array(
-            [(int(fcd.datetime.timestamp()), fcd.segment.node_from, fcd.segment.node_to, fcd.segment.length,
-              fcd.vehicle_id, float(fcd.start_offset), fcd.speed, fcd.active) for fcd in buffer],
+            [(
+                int(fcd.datetime.timestamp()),
+                fcd.segment.node_from,
+                fcd.segment.node_to,
+                fcd.segment.length,
+                fcd.vehicle_id,
+                float(fcd.start_offset),
+                fcd.speed,
+                fcd.active,
+                (fcd.vehicle_type or "").encode("utf-8")  
+            ) for fcd in buffer],
             dtype=compound_dtype
         )
+
 
         # Append data to the HDF5 file
         data_len = len(data)

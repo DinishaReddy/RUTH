@@ -118,14 +118,18 @@ class FCDHistory:
                         'segment_length': 'segment_length',
                         'vehicle_id': 'vehicle_id',
                         'start_offset_m': 'start_offset_m',
-                        'speed_mps': 'speed_mps'
+                        'speed_mps': 'speed_mps',
+                        'vehicle_type': 'vehicle_type'
                     })
-                    return df[['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps']]
+                    # Decode vehicle_type from bytes to string
+                    if 'vehicle_type' in df.columns:
+                        df['vehicle_type'] = df['vehicle_type'].str.decode('utf-8')
+                    return df[['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps', 'vehicle_type']]
         except Exception as e:
             print(f"Error loading from HDF5: {e}")
         
         # Return empty dataframe if no data
-        return pd.DataFrame(columns=['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps'])
+        return pd.DataFrame(columns=['timestamp', 'node_from', 'node_to', 'segment_length', 'vehicle_id', 'start_offset_m', 'speed_mps', 'vehicle_type'])
 
 
     def speed_in_time_at_segment(self, datetime, node_from, node_to):
