@@ -33,19 +33,22 @@ class GlobalView:
         else:
             self.car_to_segment[fcd.vehicle_id] = fcd.segment.id
 
-    def length_of_vehicles_ahead(self, datetime, segment_id, tolerance=None, vehicle_id=-1,
-                                 vehicle_offset_m=0):
-        # sums the lengths of all vehicles ahead of the vehicle with vehicle_id at the given segment_id at given time range
+    def load_ahead(self, datetime, segment_id, tolerance=None, vehicle_id=-1,
+                   vehicle_offset_m=0):
+        # sums the PCU and occupied lengths (length + standstill gap) of all vehicles ahead of the vehicle with vehicle_id at the given segment_id at given time range
         # if case vehicle_id not set, then all vehicles are summed
 
         tolerance = tolerance if tolerance is not None else timedelta(seconds=0)
-        total_length = 0.0
+        vehicles_ahead = {}
         for fcd in self.fcd_by_segment.get(segment_id, []):
             if datetime - tolerance <= fcd.datetime <= datetime + tolerance:
                 if fcd.vehicle_id != vehicle_id and fcd.start_offset > vehicle_offset_m:
-                    vehicle_params = DEFAULT_VEHICLE_CLASSES.get(fcd.vehicle_type, DEFAULT_VEHICLE_CLASSES["car"])
-                    total_length += vehicle_params.length_m
-        return total_length
+                    if fcd.vehicle_id not in vehicles_ahead:
+                        vehicle_params = DEFAULT_VEHICLE_CLASSES.get(fcd.vehicle_type, DEFAULT_VEHICLE_CLASSES["car"])
+                        vehicles_ahead[fcd.vehicle_id] = vehicle_params
+        total_pcu = sum(p.pcu for p in vehicles_ahead.values())
+        total_occupied_length = sum(p.length_m + p.standstill_gap_m for p in vehicles_ahead.values())
+        return total_pcu, total_occupied_length, vehicles_ahead
 
     def level_of_service_in_front_of_vehicle(self, datetime, segment, vehicle_id=-1,
                                              vehicle_offset_m=0, tolerance=None, limit_vehicle_count=False):
@@ -59,12 +62,17 @@ class GlobalView:
             ((30, 42), (0.6, 0.8)),
             ((42, 67), (0.8, 1.0))]
 
-        n_vehicles = self.length_of_vehicles_ahead(datetime, segment.id, tolerance,
-                                                   vehicle_id, vehicle_offset_m)
+        sum_pcu, sum_occupied_length, vehicles_ahead = self.load_ahead(datetime, segment.id, tolerance,
+                                         vehicle_id, vehicle_offset_m)
 
-        if limit_vehicle_count and vehicle_offset_m == 0.0:
-            vehicles_length = n_vehicles
-            if vehicles_length > segment.length:
+        available_length = segment.length - vehicle_offset_m
+        if limit_vehicle_count and vehicle_offset_m == 0.0 and segment.length >= 10.0:
+            vehicles_occupied_length = sum_occupied_length
+            if vehicles_occupied_length > available_length:
+                # Count cars and trucks
+                car_count = sum(1 for p in vehicles_ahead.values() if p.name == 'car')
+                truck_count = sum(1 for p in vehicles_ahead.values() if p.name == 'truck')
+                print(f"JAM TRIGGERED: segment {segment.id}, length={segment.length:.2f}, available={available_length:.2f}, lanes={segment.lanes}, vehicles={len(vehicles_ahead)}, sum_occupied={vehicles_occupied_length:.2f}, cars={car_count}, trucks={truck_count}")
                 return float("inf")
 
         # NOTE: the ending length is set to avoid massive LoS increase at the end of the segments and also on short
@@ -72,11 +80,11 @@ class GlobalView:
         ending_length = 200
         rest_segment_length = segment.length - vehicle_offset_m
 
-        # rescale density
+        # rescale density using PCU (effective vehicle count)
         if rest_segment_length < ending_length:
-            n_vehicles_per_mile = (n_vehicles / 5.0) * mile / ending_length  # assuming average 5m per vehicle
+            n_vehicles_per_mile = sum_pcu * mile / ending_length
         else:
-            n_vehicles_per_mile = (n_vehicles / 5.0) * mile / (rest_segment_length * segment.lanes)
+            n_vehicles_per_mile = sum_pcu * mile / (rest_segment_length * segment.lanes)
 
         los = float("inf")  # in case the vehicles are stuck in traffic jam
         for (low, high), (m, n) in ranges:
