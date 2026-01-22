@@ -12,6 +12,8 @@ from ..vehicle import Vehicle
 
 logger = logging.getLogger(__name__)
 
+turn_log_count = 0
+
 
 def move_on_segment(
         vehicle: Vehicle,
@@ -30,14 +32,59 @@ def move_on_segment(
     current_segment = driving_route_part[0]
     assert segment_position.position <= current_segment.length
 
+    turn_type = 'straight'
+    abs_angle_deg = 0.0
+    next_segment = None
+    prev_segment = None
+
     if start_position == current_segment.length:
         # if the vehicle is at the end of a segment and there are more segments in the route
         if vehicle.has_next_segment_closed(routing_map):
             return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
+        
+        # Save the previous segment before switching
+        prev_segment = current_segment
+        
+        # Calculate turn type before moving to next segment
+        next_segment = driving_route_part[1]
+        
+        if current_segment.node_from == next_segment.node_from and current_segment.node_to == next_segment.node_to:
+            logger.warning(f"Vehicle {vehicle.id} moving to same edge, classifying as straight")
+            turn_type = 'straight'
+            abs_angle_deg = 0.0
+        else:
+            from_pos = (routing_map.network.nodes[current_segment.node_from]['x'], routing_map.network.nodes[current_segment.node_from]['y'])
+            to_pos = (routing_map.network.nodes[current_segment.node_to]['x'], routing_map.network.nodes[current_segment.node_to]['y'])
+            next_to_pos = (routing_map.network.nodes[next_segment.node_to]['x'], routing_map.network.nodes[next_segment.node_to]['y'])
+            
+            current_vector = (to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
+            next_vector = (next_to_pos[0] - to_pos[0], next_to_pos[1] - to_pos[1])
+            
+            current_angle = math.atan2(current_vector[1], current_vector[0])
+            next_angle = math.atan2(next_vector[1], next_vector[0])
+            angle_diff = next_angle - current_angle
+            
+            # Normalize to -pi to pi
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            abs_angle = abs(angle_diff)
+            if abs_angle < math.radians(30):
+                turn_type = 'straight'
+            elif abs_angle > math.radians(150):
+                turn_type = 'u_turn'
+            else:
+                turn_type = 'turn'
+            
+            abs_angle_deg = abs_angle * 180 / math.pi
+        next_segment = driving_route_part[1]
+        
         # if the vehicle can move to the next segment, work with the next segment
         start_position = LengthMeters(0.0)
         segment_position = SegmentPosition(segment_position.index + 1, start_position)
-        current_segment = driving_route_part[1]
+        current_segment = next_segment
 
     if segment_position.index == (len(vehicle.osm_route) - 1) and start_position == current_segment.length:
         # the end of the driving route
@@ -68,6 +115,29 @@ def move_on_segment(
     segment_max_speed = speed_kph_to_mps(SpeedKph(speed_limit_kph * level_of_service))
     vehicle_max_speed = vehicle.max_speed_mps
     speed_mps = min(segment_max_speed, vehicle_max_speed)
+    
+    # Apply turning delay reduction
+    if turn_type != 'straight':
+        base_speed = speed_mps
+        if vehicle.vehicle_type == 'car':
+            if turn_type == 'turn':
+                multiplier = 0.7
+            else:  # u_turn
+                multiplier = 0.5
+        else:  # truck
+            if turn_type == 'turn':
+                multiplier = 0.6
+            else:
+                multiplier = 0.4
+        if level_of_service < 0.5:
+            multiplier *= 0.8
+        speed_mps *= multiplier
+        
+        global turn_log_count
+        if turn_log_count < 50:
+            turn_log_count += 1
+            logger.info(f"Turn delay: {vehicle.id}, {vehicle.vehicle_type}, prev {prev_segment.node_from}->{prev_segment.node_to}, next {current_segment.node_from}->{current_segment.node_to}, angle {abs_angle_deg:.1f}, {turn_type}, base {base_speed:.2f}, mult {multiplier:.2f}, final {speed_mps:.2f}, los {level_of_service:.2f}")
+    
     if math.isclose(speed_mps, 0.0):
         # in case the vehicle is not moving, move the time and keep the previous position
         return current_time + vehicle.frequency, vehicle.segment_position, SpeedMps(0.0)
@@ -101,7 +171,7 @@ def advance_vehicle(vehicle: Vehicle, departure_time: datetime,
     current_time = departure_time + vehicle.time_offset
     fcds = []
 
-    current_vehicle_index = vehicle.start_index
+    current_vehicle_index = vehicle.segment_position.index
     osm_route_part = vehicle.osm_route[current_vehicle_index:current_vehicle_index + 3]
     driving_route_part = routing_map.osm_route_to_py_segments(osm_route_part)
 
